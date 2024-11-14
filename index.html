@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1rem;
+      padding: 1rem;
+    }
+    .video-container {
+      position: relative;
+      background: #f0f0f0;
+      padding: 10px;
+      border-radius: 8px;
+      margin-bottom: 10px;
+    }
+    .video-label {
+      position: absolute;
+      top: 5px;
+      left: 5px;
+      background: rgba(0,0,0,0.7);
+      color: white;
+      padding: 2px 5px;
+      border-radius: 3px;
+      z-index: 1;
+    }
+    .controls {
+      margin: 20px 0;
+      padding: 10px;
+      background: #f5f5f5;
+      border-radius: 5px;
+    }
+    button {
+      padding: 8px 16px;
+      margin: 0 5px;
+      border-radius: 4px;
+      border: 1px solid #ddd;
+      background: #fff;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #f0f0f0;
+    }
+    .hidden {
+      display: none;
+    }
+    select {
+      padding: 8px;
+      margin-right: 10px;
+      border-radius: 4px;
+      border: 1px solid #ddd;
+    }
+    #status {
+      margin: 10px 0;
+      padding: 10px;
+      border-radius: 4px;
+      background: #e8f5e9;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+<div id="setup-panel" class="controls">
+  <h3>Session Setup</h3>
+  <select id="role-select">
+    <option value="student">Join as Student</option>
+    <option value="instructor">Join as Instructor</option>
+  </select>
+  <button id="start-button">Start Session</button>
+</div>
+
+<div id="status"></div>
+
+<div id="session-controls" class="controls hidden">
+  <button id="share-screen">Share Screen</button>
+  <button id="stop-share" class="hidden">Stop Sharing</button>
+  <button id="share-camera">Share Camera</button>
+  <button id="stop-camera" class="hidden">Stop Camera</button>
+</div>
+
+<div id="local-streams">
+  <h3>Local Streams</h3>
+  <div id="localVideo-container" class="video-container hidden">
+    <div class="video-label">Your Camera</div>
+    <video id="localVideo" width="320" height="240" autoplay muted></video>
+  </div>
+  <div id="localScreen-container" class="video-container hidden">
+    <div class="video-label">Your Screen</div>
+    <video id="localScreen" width="320" height="240" autoplay muted></video>
+  </div>
+</div>
+
+<div id="remote-streams">
+  <h3>Remote Streams</h3>
+  <div id="remoteVideos" class="video-grid"></div>
+</div>
+
+<h3>Connection Logs</h3>
+<div id="logs" style="font-family: monospace; padding: 10px; background: #f8f9fa;"></div>
+
+<script>
+  let pc;
+  let ws;
+  let screenStream;
+  let cameraStream;
+  let currentRole;
+  let userId = 'user_' + Math.random().toString(36).substr(2, 9);
+
+  const setupPanel = document.getElementById('setup-panel');
+  const sessionControls = document.getElementById('session-controls');
+  const shareScreenBtn = document.getElementById('share-screen');
+  const stopShareBtn = document.getElementById('stop-share');
+  const shareCameraBtn = document.getElementById('share-camera');
+  const stopCameraBtn = document.getElementById('stop-camera');
+  const localVideoContainer = document.getElementById('localVideo-container');
+  const localScreenContainer = document.getElementById('localScreen-container');
+  const statusElement = document.getElementById('status');
+
+  // listener
+  document.getElementById('start-button').onclick = startSession;
+  shareScreenBtn.onclick = shareScreen;
+  stopShareBtn.onclick = stopScreenShare;
+  shareCameraBtn.onclick = shareCamera;
+  stopCameraBtn.onclick = stopCamera;
+
+  function showStatus(message, type = 'info') {
+    statusElement.style.display = 'block';
+    statusElement.style.background = type === 'error' ? '#ffebee' : '#e8f5e9';
+    statusElement.textContent = message;
+  }
+
+  async function startSession() {
+    try {
+      currentRole = document.getElementById('role-select').value;
+      setupPanel.classList.add('hidden');
+      sessionControls.classList.remove('hidden');
+
+      showStatus(`Joining as ${currentRole}...`);
+
+      pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' }
+        ]
+      });
+
+      setupPeerConnection(pc);
+
+      ws = new WebSocket("{{.}}");
+      setupWebSocket(ws);
+
+      // Send initial role message when WebSocket connects
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          event: 'role',
+          role: currentRole,
+          userId: userId
+        }));
+        showStatus(`Connected as ${currentRole}`);
+      };
+
+    } catch (err) {
+      console.error('Error starting session:', err);
+      showStatus('Failed to start session: ' + err.message, 'error');
+    }
+  }
+
+  async function shareScreen() {
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: "always",
+          displaySurface: "monitor"
+        },
+        audio: true
+      });
+
+      shareScreenBtn.classList.add('hidden');
+      stopShareBtn.classList.remove('hidden');
+      localScreenContainer.classList.remove('hidden');
+
+      document.getElementById('localScreen').srcObject = screenStream;
+
+      screenStream.getTracks().forEach(track => {
+        track.id = "screen";
+        pc.addTrack(track, screenStream);
+        track.onended = stopScreenShare;
+      });
+
+      showStatus('Screen sharing started');
+    } catch (err) {
+      console.error('Error sharing screen:', err);
+      showStatus('Failed to share screen: ' + err.message, 'error');
+    }
+  }
+
+  function stopScreenShare() {
+    if (screenStream) {
+      screenStream.getTracks().forEach(track => {
+        track.stop();
+        const sender = pc.getSenders().find(s => s.track === track);
+        if (sender) {
+          pc.removeTrack(sender);
+        }
+      });
+      screenStream = null;
+      shareScreenBtn.classList.remove('hidden');
+      stopShareBtn.classList.add('hidden');
+      localScreenContainer.classList.add('hidden');
+      showStatus('Screen sharing stopped');
+    }
+  }
+
+  async function shareCamera() {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
+      });
+
+      shareCameraBtn.classList.add('hidden');
+      stopCameraBtn.classList.remove('hidden');
+      localVideoContainer.classList.remove('hidden');
+
+      document.getElementById('localVideo').srcObject = cameraStream;
+
+      cameraStream.getTracks().forEach(track => {
+        track.id = "camera";
+        pc.addTrack(track, cameraStream);
+      });
+
+      showStatus('Camera sharing started');
+    } catch (err) {
+      console.error('Error sharing camera:', err);
+      showStatus('Failed to share camera: ' + err.message, 'error');
+    }
+  }
+
+  function stopCamera() {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => {
+        track.stop();
+        const sender = pc.getSenders().find(s => s.track === track);
+        if (sender) {
+          pc.removeTrack(sender);
+        }
+      });
+      cameraStream = null;
+      shareCameraBtn.classList.remove('hidden');
+      stopCameraBtn.classList.add('hidden');
+      localVideoContainer.classList.add('hidden');
+      showStatus('Camera sharing stopped');
+    }
+  }
+
+  function setupPeerConnection(pc) {
+    pc.ontrack = function(event) {
+      if (event.track.kind !== 'video') return;
+
+
+      const container = document.createElement('div');
+      container.className = 'video-container';
+
+
+      const label = document.createElement('div');
+      label.className = 'video-label';
+
+
+      const isScreen = event.track.id === "screen";
+      label.textContent = `${isScreen ? 'Screen' : 'Camera'} - ${event.streams[0].id}`;
+
+      // Create video element
+      const video = document.createElement('video');
+      video.srcObject = event.streams[0];
+      video.autoplay = true;
+      video.playsInline = true;
+      video.width = 320;
+      video.height = 240;
+
+      container.appendChild(label);
+      container.appendChild(video);
+      document.getElementById('remoteVideos').appendChild(container);
+
+
+      event.track.onended = () => {
+        container.remove();
+      };
+
+
+      event.streams[0].onremovetrack = () => {
+        container.remove();
+      };
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE Connection State:', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected') {
+        showStatus('Connected to peers');
+      } else if (pc.iceConnectionState === 'disconnected') {
+        showStatus('Disconnected from peers', 'error');
+      }
+    };
+
+    pc.onicecandidate = e => {
+      if (!e.candidate) return;
+      ws.send(JSON.stringify({
+        event: 'candidate',
+        data: JSON.stringify(e.candidate)
+      }));
+    };
+  }
+
+  function setupWebSocket(ws) {
+    ws.onclose = () => {
+      showStatus('WebSocket connection closed', 'error');
+    };
+
+    ws.onmessage = async function(evt) {
+      const msg = JSON.parse(evt.data);
+      if (!msg) return console.log('Failed to parse message');
+
+      switch (msg.event) {
+        case 'offer':
+          try {
+            const offer = JSON.parse(msg.data);
+            await pc.setRemoteDescription(offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({
+              event: 'answer',
+              data: JSON.stringify(answer)
+            }));
+          } catch (err) {
+            console.error('Error handling offer:', err);
+            showStatus('Error handling connection offer', 'error');
+          }
+          break;
+
+        case 'candidate':
+          try {
+            const candidate = JSON.parse(msg.data);
+            await pc.addIceCandidate(candidate);
+          } catch (err) {
+            console.error('Error handling ICE candidate:', err);
+          }
+          break;
+      }
+    };
+
+    ws.onerror = err => {
+      console.error('WebSocket error:', err);
+      showStatus('WebSocket error occurred', 'error');
+    };
+  }
+</script>
+</body>
+</html>
