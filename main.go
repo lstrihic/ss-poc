@@ -202,7 +202,13 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	c := &threadSafeWriter{Conn: unsafeConn}
 
-	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
+	})
 	if err != nil {
 		log.Printf("Failed to create PeerConnection: %v", err)
 		return
